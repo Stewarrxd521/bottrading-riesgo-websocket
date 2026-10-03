@@ -227,13 +227,13 @@ STATUS_POLL_MS = int(os.getenv("STATUS_POLL_MS", "1500"))   # estructura complet
 COOLDOWN_SECONDS     = int(os.getenv("COOLDOWN_SECONDS",     "86400"))
 
 # Tiempo de gracia al detener un cache WS (segundos)
-WS_STOP_GRACE        = float(os.getenv("WS_STOP_GRACE", "0.8"))
+WS_STOP_GRACE        = float(os.getenv("WS_STOP_GRACE", "0.4"))
 
 # Precio máximo permitido para abrir nuevas entradas (bloqueo permanente si supera)
 MAX_PRICE_BLOCK = float(os.getenv("MAX_PRICE_BLOCK", "1.5"))
 
-ENTRY_LEVELS    = [float(x) for x in os.getenv("ENTRY_LEVELS",    "50,75,100,150,200,250").split(",")]
-ENTRY_NOTIONALS = [float(x) for x in os.getenv("ENTRY_NOTIONALS", "5,5,10,20,40,80").split(",")]
+ENTRY_LEVELS    = [float(x) for x in os.getenv("ENTRY_LEVELS",    "50,75,100,150,200,250,300").split(",")]
+ENTRY_NOTIONALS = [float(x) for x in os.getenv("ENTRY_NOTIONALS", "5,5,10,20,40,80,160").split(",")]
 TAKE_PROFIT_FRACTION = float(os.getenv("TAKE_PROFIT_FRACTION", "0.14284"))
 
 # Stop loss por defecto en USD (pérdida absoluta, valor negativo). Es el SL
