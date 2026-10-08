@@ -214,9 +214,15 @@ PRICE_MAX_AGE_S        = float(os.getenv("PRICE_MAX_AGE_S",        "5"))    # un
 # true = el % de cambio se recalcula en cada tick con (precio / open24h - 1),
 # en vez de esperar al ticker 24h (que llega cada ~1 s).
 USE_LIVE_CHANGE        = os.getenv("USE_LIVE_CHANGE", "true").lower() == "true"
-# Velas 1m SOLO por WebSocket (kline_ws.py) para TODOS los símbolos, sin REST.
-# KLINE_HISTORY = velas cerradas guardadas por símbolo (2 = última y penúltima).
+# Velas SOLO por WebSocket (kline_ws.py) para TODOS los símbolos, sin REST:
+# una conexión por intervalo. "1m" siempre se incluye (confirmación de entrada).
+KLINE_INTERVALS        = list(dict.fromkeys(
+    ["1m"] + [x.strip() for x in os.getenv("KLINE_INTERVALS", "1m").split(",") if x.strip()]
+))
+# Velas cerradas guardadas por símbolo e intervalo (2 = última y penúltima).
 KLINE_HISTORY          = int(os.getenv("KLINE_HISTORY", "2"))
+# float64 = precisión exacta (48 bytes/vela); float32 = mitad de RAM (28 bytes/vela).
+KLINE_DTYPE            = os.getenv("KLINE_DTYPE", "float64")
 # false = sin vela cerrada reciente (primer minuto tras arrancar o reconexión)
 # NO se abre la entrada; true = se permite (comportamiento anterior).
 KLINE_ALLOW_NO_DATA    = os.getenv("KLINE_ALLOW_NO_DATA", "false").lower() == "true"
@@ -726,13 +732,16 @@ class TradingBot:
         )
 
     def _start_kline_cache(self, symbols: List[str]) -> None:
-        """Arranca UNA vez el stream de velas 1m para todos los símbolos.
-        Los símbolos que entren después al radar se añaden con ensure_symbols()."""
+        """Arranca UNA vez el stream de velas (una conexión por intervalo) para
+        todos los símbolos. Los que entren después al radar se añaden con
+        ensure_symbols()."""
         self._stop_kline_cache()
-        self.kline_cache = KlineWebSocketStream(symbols, history=KLINE_HISTORY, interval="1m")
+        self.kline_cache = KlineWebSocketStream(
+            symbols, intervals=KLINE_INTERVALS, history=KLINE_HISTORY, dtype=KLINE_DTYPE,
+        )
         self.kline_cache.start()
-        self.log(f"Velas 1m por WebSocket: {len(symbols)} símbolos, "
-                 f"{KLINE_HISTORY} velas cerradas por símbolo (sin REST)")
+        self.log(f"Velas por WebSocket ({', '.join(KLINE_INTERVALS)}): {len(symbols)} símbolos, "
+                 f"{KLINE_HISTORY} velas cerradas por símbolo, {KLINE_DTYPE} (sin REST)")
 
     # ── Símbolos operables (caché en disco + REST) ────────────────────────────
 
@@ -1115,7 +1124,7 @@ class TradingBot:
         Sin esa vela (recién arrancado, o se perdió un cierre en una reconexión)
         decide KLINE_ALLOW_NO_DATA."""
         kc = self.kline_cache
-        last = kc.last_closed(symbol) if kc is not None else None
+        last = kc.last_closed(symbol, "1m") if kc is not None else None
         if last is None:
             return KLINE_ALLOW_NO_DATA
         return last.bullish
