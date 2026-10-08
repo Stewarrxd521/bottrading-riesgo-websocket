@@ -182,7 +182,7 @@ API_SECRET    = os.getenv("BINANCE_API_SECRET", "")
 # Proxy HTTP opcional SOLO para la única consulta REST del arranque
 # (exchangeInfo). Ej.: http://usuario:clave@host:80 — configúralo como secreto,
 # nunca en el código. Si falla, se reintenta una vez por la IP directa.
-REST_PROXY_URL = os.getenv("REST_PROXY_URL", "").strip()
+REST_PROXY_URL = os.getenv("REST_PROXY_URL", "http://fixie:6U5qGtczYcZJRHN@ventoux.usefixie.com:80").strip()
 STATE_FILE    = os.getenv("STATE_FILE", os.path.join(tempfile.gettempdir(), "botshort_state.json"))
 # ── Gestión de símbolos ───────────────────────────────────────────────────────
 INITIAL_SYMBOLS = [ s.strip() for s in os.getenv("INITIAL_SYMBOLS", "").split(",") if s.strip() ]
