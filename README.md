@@ -4,8 +4,12 @@ Aplicación web lista para Render que monitorea los ganadores de Binance USDT-M 
 
 ## Estrategia implementada
 
-- Actualiza los ganadores de Binance Futures por `priceChangePercent` de 24h con **una** consulta REST controlada por minuto.
-- Usa WebSocket de Binance (`!ticker@arr`) para mantener precios, cambios 24h y volumen en tiempo real entre escaneos, evitando polling agresivo.
+- **Casi sin REST** (para evitar baneos de IP de Binance):
+  - La única petición REST de datos es `exchangeInfo`, una vez al arrancar, y se guarda en disco. Si el caché tiene menos de `SYMBOL_REFRESH_HOURS`, el arranque no hace ninguna. Puede ir por un proxy (`REST_PROXY_URL`); si el proxy falla se reintenta una vez por la IP directa.
+  - No se consulta ni se cambia el leverage: se usa el que ya tenga la cuenta.
+  - REST solo se usa además para enviar órdenes reales (`PAPER_MODE=false` y `LIVE_TRADING=true`).
+- Precios, cambio 24h y volumen por WebSocket (`!ticker@arr`, `!markPrice@arr`, `<symbol>@bookTicker`).
+- Velas 1m de **todos** los símbolos solo por WebSocket (`kline_ws.py`): se guardan las últimas `KLINE_HISTORY` velas cerradas por símbolo, sin backfill REST. La confirmación de entrada exige que la vela del minuto anterior haya cerrado alcista.
 - Abre short en tramos configurables cuando el cambio 24h supera estos niveles:
   - `50%, 75%, 100%, 150%, 200%, 250%`
 - Tamaño de cada tramo:
@@ -47,7 +51,11 @@ BINANCE_API_SECRET=tu_api_secret
 | `MAX_SYMBOLS` | `120` | Máximo de ganadores a evaluar por escaneo. |
 | `MIN_GAIN_TO_SHOW` | `0` | Filtro mínimo de porcentaje para mostrar ganadores en la tabla. |
 | `INCLUDE_SPOT_WINNERS` | `false` | Conservado solo para el fallback manual REST; el escaneo operativo usa futures por WebSocket. |
-| `LEVERAGE` | `1` | Apalancamiento que intentará configurar en modo real. |
+| `REST_PROXY_URL` | vacío | Proxy HTTP para la única petición REST del arranque (`exchangeInfo`). Configúralo como secreto. |
+| `SYMBOL_REFRESH_HOURS` | `12` | Antigüedad máxima del caché de `exchangeInfo` en disco antes de volver a pedirlo al arrancar. |
+| `KLINE_HISTORY` | `2` | Velas 1m cerradas guardadas por símbolo. |
+| `KLINE_ALLOW_NO_DATA` | `false` | Si es `true`, permite entrar cuando aún no hay vela cerrada reciente. |
+| `KLINE_STREAMS_PER_CONN` | `200` | Streams de kline por conexión WebSocket. |
 | `STATE_FILE` | `/tmp/bottradingriesgo_state.json` | Archivo usado para compartir el último estado útil entre reinicios/workers. |
 
 ## Ejecutar local
