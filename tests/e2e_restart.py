@@ -298,7 +298,7 @@ def main() -> None:
         # 7. Apagado ordenado (SIGTERM de Render a gunicorn): guardado final en Upstash
         e.kill(signal.SIGTERM)
         assert "guardado final enviado y control liberado" in e.logs(), "sin guardado final al apagar"
-        assert "FAKEUSDT" in redis.state()["positions"] and redis.owner() is None
+        assert "FAKEUSDT" in redis.state()["positions"] and redis.owner().endswith("|released")
         print("✓ E (gunicorn) recibió SIGTERM, hizo el guardado final y liberó el control")
         print("\nTODO OK")
     finally:

@@ -11,7 +11,9 @@ los archivos locales. Este módulo guarda fuera del contenedor, en Upstash Redis
                     realizado. Al cerrarse una posición desaparece del documento.
   <prefijo>:trades  lista con el historial de cierres (MFE/MAE), últimos N.
   <prefijo>:owner   "<instancia>|<secuencia>" con caducidad (lease): qué instancia
-                    controla el estado. Caduca sola si esa instancia muere.
+                    controla el estado. Caduca sola si esa instancia muere. Al
+                    apagarse se marca "|released": libre para la siguiente, pero
+                    rechaza cualquier escritura atrasada de la que se fue.
 
 Garantías
   • Una sola instancia opera a la vez. La que arranca espera a que la anterior
@@ -47,6 +49,7 @@ from typing import Any, Callable, Deque, List, Optional, Tuple
 HEARTBEAT_S     = float(os.getenv("STATE_HEARTBEAT_S", "40"))
 OWNER_LEASE_S   = float(os.getenv("STATE_OWNER_LEASE_S", "120"))  # sin renovar, el control caduca
 CRIT_STALL_S    = 10.0     # apertura/cierre sin guardar más de esto → sin entradas nuevas
+CLOSE_RETRY_S   = 12.0     # reintentos del guardado final (Render da 30 s entre SIGTERM y SIGKILL)
 DEBOUNCE_S      = 0.3
 WAIT_POLL_S     = 3.0      # sondeo mientras otra instancia es la dueña (deploy con solapamiento)
 WAIT_FAST_FOR_S = 600.0    # después, sondeo al ritmo del lease (ahorra comandos)
@@ -60,10 +63,11 @@ class StoreError(RuntimeError):
 
 
 # Los marcadores "-- botshort:<nombre>" identifican cada script en los logs de Upstash.
-# KEYS: owner, state, trades.  El dueño se guarda como "<instancia>|<secuencia>".
+# KEYS: owner, state, trades.  El dueño se guarda como "<instancia>|<secuencia>"
+# ("…|released" tras un apagado ordenado: libre para tomarlo).
 _ACQUIRE_LUA = """-- botshort:acquire
 local cur = redis.call('GET', KEYS[1])
-if cur then
+if cur and string.sub(cur, -9) ~= '|released' then
   local who = string.match(cur, '^(.-)|%d+$') or cur
   if who ~= ARGV[1] then return {0, who, redis.call('PTTL', KEYS[1])} end
 end
@@ -76,9 +80,15 @@ return {1, redis.call('GET', KEYS[2]) or '', trades}
 
 # ARGV: instancia, secuencia, lease_ms, liberar(0/1), documento ('' = solo latido),
 #       máximo del historial, filas nuevas del historial...
+# Devuelve 1 = guardado, 0 = otra instancia es la dueña, 2 = escritura atrasada
+# (ignorada), 3 = esta instancia ya liberó el control (ignorada).
 _WRITE_LUA = """-- botshort:write
 local cur = redis.call('GET', KEYS[1])
 if cur then
+  if string.sub(cur, -9) == '|released' then
+    if string.sub(cur, 1, #ARGV[1] + 1) == ARGV[1] .. '|' then return 3 end
+    return 0
+  end
   local who, last = string.match(cur, '^(.-)|(%d+)$')
   if not who then who, last = cur, '0' end
   if who ~= ARGV[1] then return 0 end
@@ -90,7 +100,7 @@ if #ARGV > 6 then
   redis.call('LTRIM', KEYS[3], -tonumber(ARGV[6]), -1)
 end
 if ARGV[4] == '1' then
-  redis.call('DEL', KEYS[1])
+  redis.call('SET', KEYS[1], ARGV[1] .. '|' .. ARGV[2] .. '|released', 'PX', ARGV[3])
 else
   redis.call('SET', KEYS[1], ARGV[1] .. '|' .. ARGV[2], 'PX', ARGV[3])
 end
@@ -313,16 +323,24 @@ class StateStore:
         self.stopping = True
 
     def close(self) -> bool:
-        """Apagado ordenado: guardado final y libera el control para la siguiente instancia."""
+        """Apagado ordenado: guardado final y libera el control para la siguiente
+        instancia. Si Upstash falla, reintenta durante CLOSE_RETRY_S."""
         self.stopping = True
         ok = False
+        deadline = time.time() + CLOSE_RETRY_S
         with self._io_lock:
             try:
-                if not self._stop and (self.is_owner or (not self.remote and self.writes_enabled)):
-                    ok = self._flush_locked(force=True, release=self.remote)
-            except Exception as exc:
-                self.last_error = str(exc)
-                self.log(f"[estado] no pude hacer el guardado final: {exc}")
+                while not self._stop and (self.is_owner or (not self.remote and self.writes_enabled)):
+                    try:
+                        ok = self._flush_locked(force=True, release=self.remote)
+                        break
+                    except Exception as exc:
+                        self.last_error = str(exc)
+                        if time.time() + 1.0 >= deadline:
+                            self.log(f"[estado] no pude hacer el guardado final: {exc}")
+                            break
+                        self.log(f"[estado] guardado final falló ({exc}); reintento")
+                        time.sleep(1.0)
             finally:
                 self._stop = True
                 self._wake.set()
@@ -520,7 +538,9 @@ class StateStore:
                                self.owner_id, self._seq, self._lease_ms(), "1" if release else "0",
                                payload, self.max_trades, *rows)
         code = str(res)
-        if code == "0":
+        if code == "3" and release:
+            code = "1"                          # un intento anterior ya liberó (respuesta perdida)
+        if code in ("0", "3"):
             self._lose_ownership()
             return False
         if code == "2":

@@ -69,7 +69,7 @@ def test_clean_shutdown_releases_and_next_instance_recovers_at_once(r, tmp_path)
     a.append_trade({"trade_id": 3, "closed_at_ts": 1.0})
     a._flush()
     assert a.close()                               # SIGTERM: guardado final + libera
-    assert r.owner() is None and not a.can_act()
+    assert r.owner().endswith("|released") and not a.can_act()
     b = make(r, tmp_path, "B")
     doc, trades, source = own(b)
     assert doc["trade_id_seq"] == 9 and "X" in doc["positions"]
@@ -215,7 +215,40 @@ def test_can_open_requires_recent_confirmation(r, tmp_path):
 def test_close_releases_even_before_state_is_applied(r, tmp_path):
     st = make(r, tmp_path)
     assert st._try_acquire()
-    assert st.close() and r.owner() is None
+    assert st.close() and r.owner().endswith("|released")
+
+
+def test_delayed_write_after_release_is_rejected(r, tmp_path):
+    a = make(r, tmp_path, "A", doc={"positions": {"X": {"symbol": "X"}}})
+    own(a)
+    a._flush()
+    late_seq = a._seq + 1                          # una escritura que se quedó en la red
+    a._doc["positions"].clear()                    # A cierra X y se apaga
+    a.mark_dirty()
+    assert a.close()
+    res = r.cmd("EVAL", state_store._WRITE_LUA, 3, "botshort:owner", "botshort:state", "botshort:trades",
+                "A", late_seq, 120000, "0", '{"positions":{"X":{}}}', 5000)
+    assert res == 3 and r.state()["positions"] == {}
+    b = make(r, tmp_path, "B")
+    doc, _, _ = own(b)                             # B no espera a una instancia muerta
+    assert doc["positions"] == {}
+    res = r.cmd("EVAL", state_store._WRITE_LUA, 3, "botshort:owner", "botshort:state", "botshort:trades",
+                "A", late_seq + 1, 120000, "0", '{"positions":{"X":{}}}', 5000)
+    assert res == 0 and r.owner().startswith("B|")
+
+
+def test_final_save_retries_while_upstash_fails(r, tmp_path, monkeypatch):
+    import threading
+    a = make(r, tmp_path, "A", doc={"positions": {"X": {"symbol": "X"}}})
+    own(a)
+    a._flush()
+    a._doc["positions"].clear()
+    a.append_trade({"trade_id": 1, "closed_at_ts": 1.0})
+    r.fail = True
+    threading.Timer(1.5, lambda: setattr(r, "fail", False)).start()
+    assert a.close()                               # falla, reintenta y acaba guardando
+    assert r.state()["positions"] == {} and [t["trade_id"] for t in r.trades()] == [1]
+    assert r.owner().endswith("|released")
 
 
 def test_history_duplicates_are_dropped_on_read(r, tmp_path):
