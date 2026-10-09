@@ -43,6 +43,11 @@ services:
       # (formato http://usuario:clave@host:puerto), nunca en este archivo.
       - key: REST_PROXY_URL
         sync: false
+      # ── Recuperación tras reinicio: estado en Upstash Redis (secrets) ───────
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
       - key: SYMBOL_REFRESH_HOURS
         value: "12"           # caché de exchangeInfo en disco; si es más nuevo, 0 peticiones REST
 
