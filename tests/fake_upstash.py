@@ -97,13 +97,25 @@ class FakeRedis:
         return self.cmd("GET", f"{prefix}:owner")
 
 
-def serve(redis: FakeRedis, port: int, token: str = "test-token"):
-    """Expone FakeRedis con la misma interfaz HTTP que la API REST de Upstash."""
+def serve(redis: FakeRedis, port: int, token: str = "test-token", not_found: bool = False,
+          reply=None):
+    """Expone FakeRedis con la misma interfaz HTTP que la API REST de Upstash.
+    not_found=True imita un producto que no es Redis (p. ej. QStash): 404 sin cuerpo.
+    reply=(código, cuerpo) responde eso a todo; se puede cambiar luego con srv.reply."""
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
 
         def do_POST(self):
+            canned = (404, "") if not_found else self.server.reply
+            if canned is not None:
+                code, text = canned
+                data = text.encode()
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if self.headers.get("Authorization") != f"Bearer {token}":
                 self.send_response(401)
                 self.end_headers()
@@ -123,5 +135,6 @@ def serve(redis: FakeRedis, port: int, token: str = "test-token"):
             self.wfile.write(data)
 
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    srv.reply = reply
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
