@@ -64,6 +64,44 @@ BINANCE_API_SECRET=tu_api_secret
 | `KLINE_ALLOW_NO_DATA` | `false` | Si es `true`, permite entrar cuando aún no hay vela cerrada reciente. |
 | `KLINE_STREAMS_PER_CONN` | `1024` | Máximo de símbolos por conexión; solo si se supera se abre otra para el mismo intervalo. |
 | `STATE_FILE` | `/tmp/bottradingriesgo_state.json` | Archivo usado para compartir el último estado útil entre reinicios/workers. |
+| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | vacío | Base de datos donde se guarda el estado para recuperarlo tras un reinicio. Sin ellas solo hay copia local. |
+| `STATE_KEY_PREFIX` | `botshort` | Prefijo de las claves en Upstash (cámbialo si compartes la base con otro bot). |
+| `STATE_TRADES_MAX` | `5000` | Cierres guardados en el historial remoto. |
+| `STATE_HEARTBEAT_S` | `40` | Cada cuánto renueva el control y guarda MFE/MAE. Menos segundos = más comandos de Upstash. |
+| `STATE_OWNER_LEASE_S` | `120` | Si la instancia dueña muere sin apagarse bien, la siguiente espera como mucho esto para tomar el control. |
+| `STATE_BOOT_WAIT_S` | `20` | Segundos que espera el estado antes de abrir los WebSockets; si no llega, lo aplica en cuanto llegue (mientras tanto no opera). |
+
+## Recuperación tras reinicio (Upstash Redis)
+
+En Render free el disco se borra en cada reinicio, redeploy o spin-down. Para no perder las operaciones abiertas, el bot guarda su estado en **Upstash Redis** (plan gratis, API REST, sin librerías extra):
+
+- `botshort:state`: documento con las posiciones **abiertas** y todos sus datos (tramos, precio de entrada, cantidad, SL y si es manual, MFE/MAE, `trade_id`), además de cooldowns, secuencia de `trade_id`, SL global (solo si se cambió desde la web), bloqueos por precio y PnL realizado. Al cerrarse una posición desaparece del documento.
+- `botshort:trades`: historial de cierres (últimos `STATE_TRADES_MAX`), para que `/api/stats` y el CSV sobrevivan a los reinicios.
+- `botshort:owner`: qué instancia controla el estado. Caduca sola (`STATE_OWNER_LEASE_S`) si esa instancia muere sin avisar.
+
+Cómo se comporta:
+
+- Solo una instancia opera a la vez. Al arrancar, la instancia toma el control, lee el estado y lo restaura **antes** de abrir los WebSockets, así no abre duplicados.
+- En un deploy, Render arranca la instancia nueva antes de parar la vieja. La nueva **espera sin operar** (el dashboard muestra `esperando control` y rechaza cierres y cambios de SL con 409) mientras la vieja sigue gestionando las posiciones. Cuando Render apaga la vieja (SIGTERM), esta deja de operar, guarda por última vez y libera el control; la nueva lo toma en unos segundos con todo lo que hizo la vieja.
+- Si la instancia dueña muere de golpe (sin SIGTERM), la siguiente toma el control cuando caduca (como mucho `STATE_OWNER_LEASE_S`, 2 minutos por defecto).
+- Si a una instancia le quitan el control, pasa a **standby** (no abre ni cierra nada) y lo retoma sola si la otra desaparece.
+- Si Upstash no responde, el bot no abre posiciones nuevas, pero sigue cerrando las que ya tiene. Los cambios se reintentan hasta que Upstash vuelve.
+- Aperturas, cierres y cambios de SL se guardan al instante; MFE/MAE va con el latido (cada `STATE_HEARTBEAT_S`).
+- Coste: Upstash cuenta cada comando de los scripts, así que son unos **200.000-270.000 comandos al mes** de los 500.000 gratis. Usa una base de datos solo para este bot; si la compartes con otro uso intensivo podrías pasarte del límite gratis.
+- Fuera de Render (variable `RENDER` ausente) no usa Upstash salvo `STATE_STORE_FORCE=true`, para que una prueba local no compita por el control con producción.
+
+Configuración:
+
+1. Crea una base de datos Redis gratis en [upstash.com](https://upstash.com), en la región más cercana a tu servicio de Render.
+2. En la pestaña *REST API* copia `UPSTASH_REDIS_REST_URL` y `UPSTASH_REDIS_REST_TOKEN`.
+3. Añádelas como variables de entorno (secretas) del servicio en Render.
+
+El chip **estado guardado** del dashboard muestra `upstash · ok` cuando todo va bien. `GET /api/recovery` devuelve el último documento guardado.
+
+Pruebas (necesitan `redis-server` instalado; Upstash se simula con un Redis real para ejecutar los scripts Lua):
+
+- Unitarias: `python -m pytest tests`.
+- Punta a punta (Binance y Upstash simulados, reinicios con `kill -9`, deploy con solapamiento y SIGTERM, Upstash caído): `python -m tests.e2e_restart`.
 
 ## Ejecutar local
 
