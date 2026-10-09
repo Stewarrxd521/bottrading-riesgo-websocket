@@ -310,6 +310,10 @@ def test_upstash_is_used_outside_render_too(monkeypatch):
     ("fit-cat-12345.upstash.io", "tok", "https"),
     ("https://fit-cat-12345.upstash.io/set/foo/bar", "tok", "sin ruta"),
     ("https://fit-cat-12345.upstash.io", "", "TOKEN"),
+    ("", "tok", "vacía"),
+    ("https://[x].upstash.io", "tok", "https"),
+    ("https://x.upstash.io](https://x.upstash.io)", "tok", "https"),
+    ("https://x.upstash.io:abc", "tok", "https"),
 ])
 def test_obvious_config_mistakes_are_explained_without_network(url, token, expect):
     client = UpstashRedis(url, token)
@@ -365,3 +369,79 @@ def test_read_only_token_and_quota_are_explained(body, label, expect):
     exc = _command_error("Upstash HTTP 400", _error_text(body))
     assert isinstance(exc, ConfigError) and exc.label == label and expect in str(exc)
     assert type(_command_error("Upstash", "ERR wrong number of arguments")) is StoreError
+
+
+def test_only_one_variable_set_is_a_config_error_not_local_mode(monkeypatch):
+    monkeypatch.setenv("UPSTASH_REDIS_REST_URL", "https://fit-cat-12345.upstash.io")
+    monkeypatch.delenv("UPSTASH_REDIS_REST_TOKEN", raising=False)
+    backend, desc = backend_from_env(lambda m: None)
+    assert isinstance(backend, UpstashRedis) and "TOKEN" in backend.problem and "⛔" in desc
+    monkeypatch.delenv("UPSTASH_REDIS_REST_URL")
+    monkeypatch.setenv("UPSTASH_REDIS_REST_TOKEN", "tok")
+    backend, _ = backend_from_env(lambda m: None)
+    assert isinstance(backend, UpstashRedis) and "URL" in backend.problem
+
+
+QUOTA = '{"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500000"}'
+NOPERM = '{"error":"NOPERM this user has no permissions to run the \'evalsha\' command"}'
+
+
+def _wait(cond, timeout=5.0):
+    deadline = time.time() + timeout
+    while not cond() and time.time() < deadline:
+        time.sleep(0.05)
+    return cond()
+
+
+@needs_redis
+@pytest.mark.parametrize("reply,label,expect", [
+    ((400, QUOTA), "cupo de Upstash agotado", "cupo"),
+    ((200, QUOTA), "cupo de Upstash agotado", "cupo"),
+    ((400, NOPERM), "error de configuración", "solo lectura"),
+    ((401, '{"error":"Unauthorized"}'), "error de configuración", "token rechazado"),
+    ((403, ""), "error de configuración", "token rechazado"),
+])
+def test_upstash_refusals_at_boot_are_shown_and_block_trading(r, tmp_path, reply, label, expect):
+    srv = serve(r, 0, reply=reply)
+    logs = []
+    st = make(UpstashRedis(f"http://127.0.0.1:{srv.server_address[1]}", "test-token"), tmp_path, logs=logs)
+    try:
+        st.start()
+        assert _wait(lambda: st.config_error)
+        status = st.status()
+        assert status["mode"] == label and expect in status["config_error"]
+        assert not st.can_open() and not st.can_act()
+        assert any("⛔" in m and "no abre ni cierra" in m for m in logs)
+        assert st._next_try - time.time() > state_store.CONFIG_RETRY_S - 5
+    finally:
+        st.close()
+        srv.shutdown()
+
+
+@needs_redis
+def test_owner_keeps_closing_and_retries_fast_when_quota_runs_out(r, tmp_path):
+    srv = serve(r, 0)
+    logs = []
+    doc = {"positions": {"X": {"symbol": "X"}}}
+    st = make(UpstashRedis(f"http://127.0.0.1:{srv.server_address[1]}", "test-token"), tmp_path,
+              doc=doc, logs=logs)
+    try:
+        own(st)
+        assert st._flush() and st.can_open()
+        st.start()
+        srv.reply = (400, QUOTA)
+        doc["positions"].clear()
+        st.append_trade({"trade_id": 1, "closed_at_ts": 1.0})
+        assert _wait(lambda: st.failures >= 2)
+        assert st.status()["mode"] == "cupo de Upstash agotado"
+        assert st.can_act() and not st.can_open()      # sigue cerrando, no abre
+        assert st._next_try - time.time() <= state_store.BACKOFF_MAX_S
+        warned = [m for m in logs if "⛔" in m]
+        assert len(warned) == 1 and "Sigo cerrando" in warned[0]
+        srv.reply = None                               # Upstash vuelve a aceptar comandos
+        assert _wait(lambda: not st.config_error and not st._pending_critical())
+        assert st.status()["mode"] == "ok" and st.can_open()
+        assert r.state()["positions"] == {} and [t["trade_id"] for t in r.trades()] == [1]
+    finally:
+        st.close()
+        srv.shutdown()

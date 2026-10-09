@@ -3012,8 +3012,11 @@ def _not_owner_response():
     un cambio aquí no se guardaría ni se ejecutaría."""
     if bot.store.can_act():
         return None
-    mode = bot.store.status()["mode"]
-    return jsonify({"ok": False, "error": f"Esta instancia no controla el estado ({mode}); "
+    st = bot.store.status()
+    if st["config_error"]:                      # mal configurado: esperar unos segundos no lo arregla
+        return jsonify({"ok": False, "error": f"No se puede guardar el estado ({st['mode']}): "
+                                             f"{st['config_error']}"}), 409
+    return jsonify({"ok": False, "error": f"Esta instancia no controla el estado ({st['mode']}); "
                                          "otra instancia opera o se está recuperando. "
                                          "Reintenta en unos segundos."}), 409
 
@@ -3201,5 +3204,19 @@ def api_recovery():
 
 
 if __name__ == "__main__":
+    import signal
+
+    def _stop_signal(*_):
+        # kill / systemd / docker (SIGTERM), cerrar la terminal (SIGHUP), Ctrl+Break (SIGBREAK):
+        # salir por SystemExit para que atexit haga el guardado final y libere el control.
+        # (gunicorn no pasa por aquí: él ya convierte SIGTERM en un apagado ordenado.)
+        for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"):
+            if hasattr(signal, name):
+                signal.signal(getattr(signal, name), signal.SIG_IGN)   # que otra señal no corte el guardado
+        sys.exit(0)
+
+    for _name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
+        if hasattr(signal, _name):
+            signal.signal(getattr(signal, _name), _stop_signal)
     port = int(os.getenv("PORT", "8000"))
     app.run(host="0.0.0.0", port=port, threaded=True)

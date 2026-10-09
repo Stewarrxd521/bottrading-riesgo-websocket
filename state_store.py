@@ -31,7 +31,8 @@ Garantías
     CRIT_STALL_S, no se abren posiciones nuevas; las abiertas se siguen cerrando.
   • Coste: aperturas, cierres y cambios de SL se guardan al instante; lo demás
     (MFE/MAE) va con el latido, uno cada HEARTBEAT_S. Upstash cuenta cada comando
-    de los scripts: ~200-270k comandos/mes de los 500k del plan gratis.
+    de los scripts: ~200-270k comandos/mes de los 500k del plan gratis, más
+    ~65-100k/mes por cada copia que se quede esperando el control.
 """
 
 from __future__ import annotations
@@ -73,10 +74,13 @@ class ConfigError(StoreError):
         self.label = label                     # lo que muestra el panel
 
 
-# Lo que hay que hacer cuando la URL o el token no son los de una base Redis.
-_FIX_HINT = ("Crea una base de datos Redis en console.upstash.com (pestaña Redis → Create Database, plan "
-             "Free) y copia UPSTASH_REDIS_REST_URL y UPSTASH_REDIS_REST_TOKEN de su sección Connect → REST "
-             "(con 'Read-Only Token' desactivado).")
+# Lo que hay que hacer cuando la URL no es la de una base Redis.
+_FIX_HINT = ("Si aún no tienes una base Redis, créala en console.upstash.com (pestaña Redis → Create "
+             "Database, plan Free); copia UPSTASH_REDIS_REST_URL y UPSTASH_REDIS_REST_TOKEN de su sección "
+             "Connect → REST (con 'Read-Only Token' desactivado).")
+_SAME_DB = ("de la MISMA base que UPSTASH_REDIS_REST_URL (console.upstash.com → tu base Redis → Connect → "
+            "REST, con 'Read-Only Token' desactivado), sin comillas. No crees otra base: empezaría sin el "
+            "estado guardado.")
 
 
 # Los marcadores "-- botshort:<nombre>" identifican cada script en los logs de Upstash.
@@ -132,11 +136,17 @@ def _clean_env(value: str) -> str:
 
 def config_problem(url: str, token: str) -> str:
     """Errores de configuración evidentes, sin tocar la red ('' si parece correcta)."""
-    parsed = urllib.parse.urlsplit(url)
-    host = (parsed.hostname or "").lower()
+    if not url:
+        return "UPSTASH_REDIS_REST_URL está vacía. " + _FIX_HINT
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        host = (parsed.hostname or "").lower()
+        parsed.port                             # puerto no numérico → ValueError
+    except ValueError:                          # p. ej. corchetes de un enlace markdown pegado
+        return f"UPSTASH_REDIS_REST_URL no es una URL https válida ({url[:60]!r}). " + _FIX_HINT
     if parsed.scheme in ("redis", "rediss"):
-        return ("UPSTASH_REDIS_REST_URL es la cadena de conexión redis:// (TCP). El bot usa la API REST: "
-                "pon la URL https://... de la pestaña REST. " + _FIX_HINT)
+        return ("UPSTASH_REDIS_REST_URL es la cadena de conexión redis:// (TCP), pero el bot usa la API REST: "
+                "copia la URL https://... de la pestaña Connect → REST de esa misma base.")
     if parsed.scheme not in ("http", "https") or not host:
         return f"UPSTASH_REDIS_REST_URL no es una URL https válida ({url[:60]!r}). " + _FIX_HINT
     if host.startswith("qstash"):
@@ -146,7 +156,7 @@ def config_problem(url: str, token: str) -> str:
         return (f"UPSTASH_REDIS_REST_URL debe ser solo la dirección base, sin ruta ({parsed.path!r} sobra): "
                 f"{parsed.scheme}://{parsed.netloc}")
     if not token:
-        return "UPSTASH_REDIS_REST_TOKEN está vacío. " + _FIX_HINT
+        return "UPSTASH_REDIS_REST_TOKEN está vacío: cópialo " + _SAME_DB
     return ""
 
 
@@ -179,8 +189,8 @@ class UpstashRedis:
             if exc.code in (401, 403):
                 qstash = " (parece un token de QStash)" if self.token.startswith("eyJ") else ""
                 raise ConfigError(f"Upstash HTTP {exc.code}: token rechazado{qstash} "
-                                  f"({_error_text(detail) or 'sin detalle'}). Usa el UPSTASH_REDIS_REST_TOKEN "
-                                  "de esa misma base, sin 'Read-Only Token'. " + _FIX_HINT) from exc
+                                  f"({_error_text(detail) or 'sin detalle'}). Copia otra vez "
+                                  "UPSTASH_REDIS_REST_TOKEN " + _SAME_DB) from exc
             raise _command_error(f"Upstash HTTP {exc.code}", _error_text(detail)) from exc
         except Exception as exc:
             raise StoreError(f"Upstash no responde: {exc}") from exc
@@ -204,10 +214,11 @@ def _command_error(prefix: str, err: str) -> StoreError:
     """Errores de Upstash que no se arreglan reintentando en segundos."""
     if "NOPERM" in err:
         return ConfigError(f"{prefix}: {err}. UPSTASH_REDIS_REST_TOKEN es el token de solo lectura; "
-                           "usa el normal (Connect → REST con 'Read-Only Token' desactivado).")
+                           "copia el normal " + _SAME_DB)
     if "max requests limit" in err.lower():
-        return ConfigError(f"{prefix}: {err}. Se acabó el cupo gratis del mes de esta base de Upstash "
-                           "(500k comandos). Usa una base solo para el bot o espera al mes siguiente.",
+        return ConfigError(f"{prefix}: {err}. Esta base agotó su cupo de comandos del mes. Para no perder "
+                           "lo guardado, súbela de plan en Upstash o espera al reinicio mensual; una base "
+                           "nueva empezaría sin las posiciones guardadas.",
                            label="cupo de Upstash agotado")
     return StoreError(f"{prefix}: {err}")
 
@@ -262,6 +273,8 @@ class StateStore:
         self.last_error = ""
         self.config_error = ""                 # URL/token mal configurados (se muestra en el panel)
         self.config_label = ""
+        self._cfg_logged = ""                  # último error de configuración avisado (sin repetirlo)
+        self._cfg_logged_at = 0.0
         self.writes = 0
         self.failures = 0
         self.last_doc: Optional[dict] = None
@@ -303,7 +316,7 @@ class StateStore:
         if not self.remote:
             return True
         now = time.time()
-        if now - self.last_ok > OWNER_LEASE_S / 2:
+        if self.config_error or now - self.last_ok > OWNER_LEASE_S / 2:
             return False
         with self._lock:
             stalled = self._crit_ver != self._done_crit and now - self._crit_since > CRIT_STALL_S
@@ -475,15 +488,27 @@ class StateStore:
     def _failed(self, msg: str, config: bool = False) -> None:
         self.failures += 1
         self.last_error = msg
+        now = time.time()
         if config:
-            # Reintentar en segundos no lo arregla: aviso claro y reintento cada CONFIG_RETRY_S.
             self.config_error = msg
-            self._next_try = time.time() + CONFIG_RETRY_S
-            self.log(f"[estado] ⛔ {msg} Mientras tanto el bot no abre ni cierra posiciones "
-                     f"(o quita las dos variables para operar sin guardar). Reintento en {CONFIG_RETRY_S:.0f}s")
+        if config and not self.is_owner:
+            # Sin el control no opera; reintentar en segundos no lo arregla: aviso claro cada CONFIG_RETRY_S.
+            self._next_try = now + CONFIG_RETRY_S
+            tail = ("Corrige la variable donde la definiste (en Render: Environment, guarda y vuelve a "
+                    "desplegar)." if getattr(self.backend, "problem", "")
+                    else f"Reintento en {CONFIG_RETRY_S:.0f}s.")
+            self.log(f"[estado] ⛔ {msg} Mientras tanto el bot no abre ni cierra posiciones. {tail}")
             return
-        self._next_try = time.time() + self._backoff
-        self.log(f"[estado] {msg} — reintento en {self._backoff:.0f}s")
+        # La dueña sigue con el backoff normal: renueva el control en cuanto Upstash vuelva a aceptar comandos.
+        self._next_try = now + self._backoff
+        if not config:
+            self.log(f"[estado] {msg} — reintento en {self._backoff:.0f}s")
+        elif msg != self._cfg_logged or now - self._cfg_logged_at >= CONFIG_RETRY_S:
+            self._cfg_logged, self._cfg_logged_at = msg, now
+            what = ("Sigo cerrando las posiciones abiertas, pero no abro nuevas y lo que haga no se guarda "
+                    "hasta que Upstash vuelva a aceptar comandos." if self.writes_enabled
+                    else "Mientras tanto el bot no abre ni cierra posiciones.")
+            self.log(f"[estado] ⛔ {msg} {what}")
         self._backoff = min(self._backoff * 2, BACKOFF_MAX_S)
 
     def _try_acquire(self) -> bool:
@@ -688,6 +713,6 @@ def backend_from_env(log: Callable[[str], None]) -> Tuple[Optional[UpstashRedis]
         return None, "sin UPSTASH_REDIS_REST_URL/TOKEN: el estado solo se guarda en disco local (se pierde al reiniciar en Render)"
     backend = UpstashRedis(url, token)
     if backend.problem:                     # el hilo del estado lo explica en el log y en el panel
-        return backend, "Upstash Redis (mal configurado, ver el error siguiente)"
+        return backend, "Upstash Redis (mal configurado: ver la línea con ⛔)"
     host = urllib.parse.urlsplit(backend.url).hostname or ""
     return backend, f"Upstash Redis ({host})"

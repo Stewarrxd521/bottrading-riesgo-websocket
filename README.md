@@ -88,8 +88,9 @@ Cómo se comporta:
 - Si Upstash no responde, el bot no abre posiciones nuevas, pero sigue cerrando las que ya tiene. Los cambios se reintentan hasta que Upstash vuelve.
 - Aperturas, cierres y cambios de SL se guardan al instante; MFE/MAE va con el latido (cada `STATE_HEARTBEAT_S`).
 - Coste: Upstash cuenta cada comando de los scripts, así que son unos **200.000-270.000 comandos al mes** de los 500.000 gratis. Usa una base de datos solo para este bot; si la compartes con otro uso intensivo podrías pasarte del límite gratis.
-- Funciona igual en Render o en cualquier otro sitio (tu PC, otro hosting): basta con las dos variables. Si arrancas una copia local con las mismas credenciales mientras la de Render está activa, la local espera sin operar; solo toma el control si la otra se apaga.
-- Si la URL o el token están mal (por ejemplo, la URL de **QStash**, que es el servicio de colas de Upstash y no guarda datos), el log y el panel lo dicen con un ⛔ y el bot no abre ni cierra posiciones hasta corregirlo. Para operar sin guardar, quita las dos variables.
+- Funciona igual en Render o en cualquier otro sitio (tu PC, otro hosting): basta con las dos variables. Si arrancas una copia local con las mismas credenciales mientras la de Render está activa, la local espera sin operar; solo toma el control si la otra se apaga. Mientras espera también gasta cupo (consulta el control cada 1,5-2 minutos, unos 65.000-100.000 comandos al mes), así que ciérrala si no la necesitas. Apágala con Ctrl+C o `kill` (no cerrando la ventana en Windows) para que guarde y suelte el control al momento.
+- Si la URL o el token están mal (por ejemplo, la URL de **QStash**, que es el servicio de colas de Upstash y no guarda datos), el log (línea con ⛔) y el panel lo dicen. Si pasa al arrancar, el bot no abre ni cierra posiciones hasta corregirlo. Si pasa con el bot ya operando (cupo agotado, token cambiado), deja de abrir pero sigue cerrando las que tiene, como cuando Upstash no responde.
+- Para operar sin guardar puedes quitar las dos variables, pero solo si no tienes posiciones abiertas: el bot arrancará sin recordar las que estaban guardadas en Upstash.
 
 Configuración:
 

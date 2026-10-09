@@ -214,6 +214,11 @@ def main() -> None:
         time.sleep(3)
         assert not positions(q.status()), "Q abrió una posición sin poder guardarla"
         assert "⛔" in q.logs() and "Upstash mal configurado" in q.logs()
+        try:
+            q.post("/api/set-default-sl", {"sl_usd": -3.0})
+            raise AssertionError("Q aceptó un cambio de SL sin poder guardarlo")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 409 and "QStash" in json.loads(exc.read()).get("error", ""), exc.code
         q.kill()
         print("✓ Con la URL de otro producto (404) el panel y el log explican el error y el bot no opera")
 
