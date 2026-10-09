@@ -97,13 +97,19 @@ class FakeRedis:
         return self.cmd("GET", f"{prefix}:owner")
 
 
-def serve(redis: FakeRedis, port: int, token: str = "test-token"):
-    """Expone FakeRedis con la misma interfaz HTTP que la API REST de Upstash."""
+def serve(redis: FakeRedis, port: int, token: str = "test-token", not_found: bool = False):
+    """Expone FakeRedis con la misma interfaz HTTP que la API REST de Upstash.
+    not_found=True imita un producto que no es Redis (p. ej. QStash): 404 sin cuerpo."""
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
 
         def do_POST(self):
+            if not_found:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if self.headers.get("Authorization") != f"Bearer {token}":
                 self.send_response(401)
                 self.end_headers()

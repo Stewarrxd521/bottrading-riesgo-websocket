@@ -711,7 +711,9 @@ class TradingBot:
         else:
             # Otra instancia sigue siendo la dueña (deploy con solapamiento) o Upstash
             # no responde: el mantenimiento aplicará el estado en cuanto llegue.
-            self.log("[estado] ⚠️ Aún no controlo el estado (otra instancia activa o Upstash no responde): "
+            why = ("Upstash mal configurado" if self.store.config_error
+                   else "otra instancia activa o Upstash no responde")
+            self.log(f"[estado] ⚠️ Aún no controlo el estado ({why}): "
                      "sin entradas ni cierres hasta recuperarlo")
 
         if not _ALL_MARKET_ENABLED:
@@ -2615,6 +2617,7 @@ function render(d) {
   const ps = d.persistence || {};
   q('persistMode').textContent = ps.mode ? `${ps.backend} · ${ps.mode}` : '—';
   q('persistMode').className = ps.mode === 'ok' || ps.mode === 'local' ? 'teal' : 'violet';
+  q('persistMode').title = ps.config_error || ps.last_error || '';
   q('pollCount').textContent = pollCount;
   q('livePollCount').textContent = livePollCount;
 

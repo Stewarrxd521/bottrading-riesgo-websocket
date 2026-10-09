@@ -4,7 +4,7 @@ import time
 import pytest
 
 import state_store
-from state_store import StateStore, StoreError, UpstashRedis
+from state_store import ConfigError, StateStore, StoreError, UpstashRedis, backend_from_env
 from tests.fake_upstash import HAVE_REDIS, FakeRedis, serve
 
 needs_redis = pytest.mark.skipif(not HAVE_REDIS, reason="requiere redis-server")
@@ -288,3 +288,67 @@ def test_http_client_against_fake_upstash(r, tmp_path):
             UpstashRedis(url, "wrong").cmd("GET", "k")
     finally:
         srv.shutdown()
+
+
+def test_upstash_is_used_outside_render_too(monkeypatch):
+    monkeypatch.delenv("RENDER", raising=False)
+    monkeypatch.setenv("UPSTASH_REDIS_REST_URL", '  "https://fit-cat-12345.upstash.io/"  ')
+    monkeypatch.setenv("UPSTASH_REDIS_REST_TOKEN", " AbCdToken ")
+    backend, desc = backend_from_env(lambda m: None)
+    assert isinstance(backend, UpstashRedis) and not backend.problem
+    assert backend.url == "https://fit-cat-12345.upstash.io" and backend.token == "AbCdToken"
+    assert "fit-cat-12345.upstash.io" in desc
+    monkeypatch.delenv("UPSTASH_REDIS_REST_URL")
+    monkeypatch.delenv("UPSTASH_REDIS_REST_TOKEN")
+    assert backend_from_env(lambda m: None)[0] is None
+
+
+@pytest.mark.parametrize("url,token,expect", [
+    ("https://qstash.upstash.io", "tok", "QStash"),
+    ("https://qstash-eu-central-1.upstash.io", "tok", "QStash"),
+    ("rediss://default:pw@fit-cat-12345.upstash.io:6379", "tok", "redis://"),
+    ("fit-cat-12345.upstash.io", "tok", "https"),
+    ("https://fit-cat-12345.upstash.io/set/foo/bar", "tok", "sin ruta"),
+    ("https://fit-cat-12345.upstash.io", "", "TOKEN"),
+])
+def test_obvious_config_mistakes_are_explained_without_network(url, token, expect):
+    client = UpstashRedis(url, token)
+    assert expect in client.problem
+    with pytest.raises(ConfigError):
+        client.cmd("GET", "k")
+
+
+@needs_redis
+def test_http_404_is_a_config_error_shown_on_the_dashboard(r, tmp_path):
+    srv = serve(r, 0, not_found=True)                 # como apuntar a QStash: 404 sin cuerpo
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        logs = []
+        st = make(UpstashRedis(url, "test-token"), tmp_path, logs=logs)
+        with pytest.raises(ConfigError, match="QStash"):
+            st._try_acquire()
+        try:
+            st._try_acquire()
+        except ConfigError as exc:
+            st._failed(str(exc), config=True)
+        status = st.status()
+        assert status["mode"] == "error de configuración" and "Redis" in status["config_error"]
+        assert st._next_try - time.time() > state_store.CONFIG_RETRY_S - 5
+        assert any("⛔" in m for m in logs)
+        with pytest.raises(ConfigError, match="401"):
+            UpstashRedis(f"http://127.0.0.1:{serve(r, 0).server_address[1]}", "wrong").cmd("GET", "k")
+    finally:
+        srv.shutdown()
+
+
+def test_config_error_clears_once_the_store_answers(r, tmp_path):
+    st = make(r, tmp_path)
+    st.config_error = "algo"
+    st._wake.set()
+    st.start()
+    assert st.acquired.wait(3)
+    deadline = time.time() + 3
+    while st.config_error and time.time() < deadline:
+        time.sleep(0.05)
+    assert st.config_error == "" and st.status()["mode"] == "recuperando"
+    st.close()

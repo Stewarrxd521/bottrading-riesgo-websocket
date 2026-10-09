@@ -22,6 +22,11 @@ disco "efímero" (un directorio nuevo por arranque, como en Render free):
   6. Upstash caído al arrancar: E no opera hasta recuperar el estado; cuando
      Upstash vuelve, lo recupera y abre.
   7. SIGTERM a E (gunicorn): guardado final y control liberado.
+  0. (antes de todo) Con la URL de otro producto (404, como QStash) el panel
+     muestra "error de configuración", el log explica qué variable cambiar y el
+     bot no opera.
+
+Todo corre SIN la variable RENDER: la persistencia funciona fuera de Render.
 """
 
 import asyncio
@@ -120,9 +125,8 @@ class Bot:
         self.port = free_port()
         disk = os.path.join(WORK, name)          # disco nuevo: efímero como en Render
         os.makedirs(disk)
-        env = {k: v for k, v in os.environ.items() if "proxy" not in k.lower()}
-        env.update({
-            "RENDER": "true",
+        env = {k: v for k, v in os.environ.items() if "proxy" not in k.lower() and k != "RENDER"}
+        env.update({                             # sin RENDER: también debe funcionar fuera de Render
             "UPSTASH_REDIS_REST_URL": f"http://127.0.0.1:{up_port}",
             "UPSTASH_REDIS_REST_TOKEN": "test-token",
             "STATE_HEARTBEAT_S": "2",
@@ -199,6 +203,20 @@ def main() -> None:
     LEASE = 6.0
     bots = []
     try:
+        # 0. URL de otro producto de Upstash (QStash responde 404 sin cuerpo)
+        nf_port = free_port()
+        serve(redis, nf_port, not_found=True)
+        q = Bot("Q", ws_port, up_port, STATE_BOOT_WAIT_S="3",
+                UPSTASH_REDIS_REST_URL=f"http://127.0.0.1:{nf_port}"); bots.append(q)
+        s = q.wait(lambda s: s.get("persistence", {}).get("mode") == "error de configuración",
+                   "Q muestra el error de configuración", 30)
+        assert "QStash" in s["persistence"]["config_error"]
+        time.sleep(3)
+        assert not positions(q.status()), "Q abrió una posición sin poder guardarla"
+        assert "⛔" in q.logs() and "Upstash mal configurado" in q.logs()
+        q.kill()
+        print("✓ Con la URL de otro producto (404) el panel y el log explican el error y el bot no opera")
+
         # 1. A abre la posición y la guarda en Upstash
         a = Bot("A", ws_port, up_port); bots.append(a)
         a.wait(lambda s: "FAKEUSDT" in positions(s), "A abre short en FAKEUSDT")

@@ -88,7 +88,8 @@ Cómo se comporta:
 - Si Upstash no responde, el bot no abre posiciones nuevas, pero sigue cerrando las que ya tiene. Los cambios se reintentan hasta que Upstash vuelve.
 - Aperturas, cierres y cambios de SL se guardan al instante; MFE/MAE va con el latido (cada `STATE_HEARTBEAT_S`).
 - Coste: Upstash cuenta cada comando de los scripts, así que son unos **200.000-270.000 comandos al mes** de los 500.000 gratis. Usa una base de datos solo para este bot; si la compartes con otro uso intensivo podrías pasarte del límite gratis.
-- Fuera de Render (variable `RENDER` ausente) no usa Upstash salvo `STATE_STORE_FORCE=true`, para que una prueba local no compita por el control con producción.
+- Funciona igual en Render o en cualquier otro sitio (tu PC, otro hosting): basta con las dos variables. Si arrancas una copia local con las mismas credenciales mientras la de Render está activa, la local espera sin operar; solo toma el control si la otra se apaga.
+- Si la URL o el token están mal (por ejemplo, la URL de **QStash**, que es el servicio de colas de Upstash y no guarda datos), el log y el panel lo dicen con un ⛔ y el bot no abre ni cierra posiciones hasta corregirlo. Para operar sin guardar, quita las dos variables.
 
 Configuración:
 

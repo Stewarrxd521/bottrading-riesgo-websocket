@@ -38,9 +38,11 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import deque
 from typing import Any, Callable, Deque, List, Optional, Tuple
@@ -54,12 +56,22 @@ DEBOUNCE_S      = 0.3
 WAIT_POLL_S     = 3.0      # sondeo mientras otra instancia es la dueña (deploy con solapamiento)
 WAIT_FAST_FOR_S = 600.0    # después, sondeo al ritmo del lease (ahorra comandos)
 BACKOFF_MAX_S   = 30.0
+CONFIG_RETRY_S  = 300.0    # URL/token mal configurados: reintenta cada 5 min (al cambiarlos Render reinicia)
 
 Restore = Tuple[Optional[dict], List[dict], str]
 
 
 class StoreError(RuntimeError):
     pass
+
+
+class ConfigError(StoreError):
+    """URL o token de Upstash mal configurados: reintentar no lo arregla."""
+
+
+# Lo que hay que hacer cuando la URL o el token no son los de una base Redis.
+_FIX_HINT = ("Crea una base de datos Redis en console.upstash.com (Redis → Create database) y copia "
+             "UPSTASH_REDIS_REST_URL y UPSTASH_REDIS_REST_TOKEN de su sección REST API.")
 
 
 # Los marcadores "-- botshort:<nombre>" identifican cada script en los logs de Upstash.
@@ -108,15 +120,43 @@ return 1
 """
 
 
+def _clean_env(value: str) -> str:
+    """Quita espacios y comillas que se cuelan al pegar el valor en el panel."""
+    return value.strip().strip("'\"").strip()
+
+
+def config_problem(url: str, token: str) -> str:
+    """Errores de configuración evidentes, sin tocar la red ('' si parece correcta)."""
+    parsed = urllib.parse.urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme in ("redis", "rediss"):
+        return ("UPSTASH_REDIS_REST_URL es la cadena de conexión redis:// (TCP). El bot usa la API REST: "
+                "pon la URL https://... de la sección REST API. " + _FIX_HINT)
+    if parsed.scheme not in ("http", "https") or not host:
+        return f"UPSTASH_REDIS_REST_URL no es una URL https válida ({url[:60]!r}). " + _FIX_HINT
+    if host.startswith("qstash"):
+        return ("UPSTASH_REDIS_REST_URL es la de QStash, el servicio de colas de mensajes de Upstash, "
+                "que no guarda datos. " + _FIX_HINT)
+    if parsed.path not in ("", "/"):
+        return (f"UPSTASH_REDIS_REST_URL debe ser solo la dirección base, sin ruta ({parsed.path!r} sobra): "
+                f"{parsed.scheme}://{parsed.netloc}")
+    if not token:
+        return "UPSTASH_REDIS_REST_TOKEN está vacío. " + _FIX_HINT
+    return ""
+
+
 class UpstashRedis:
     """Cliente mínimo de la API REST de Upstash Redis (solo urllib)."""
 
     def __init__(self, url: str, token: str, timeout: float = 5.0) -> None:
-        self.url = url.strip().rstrip("/")
-        self.token = token.strip()
+        self.url = _clean_env(url).rstrip("/")
+        self.token = _clean_env(token)
         self.timeout = timeout
+        self.problem = config_problem(self.url, self.token)
 
     def cmd(self, *args: Any) -> Any:
+        if self.problem:
+            raise ConfigError(self.problem)
         body = json.dumps([str(a) if not isinstance(a, str) else a for a in args]).encode("utf-8")
         req = urllib.request.Request(
             self.url, data=body, method="POST",
@@ -126,7 +166,14 @@ class UpstashRedis:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:200]
+            detail = exc.read().decode("utf-8", errors="replace")[:200].strip()
+            if exc.code == 404:
+                raise ConfigError("Upstash HTTP 404: UPSTASH_REDIS_REST_URL no es la API REST de una base "
+                                  "Redis (¿es la URL de QStash u otro producto?). " + _FIX_HINT) from exc
+            if exc.code in (401, 403):
+                raise ConfigError(f"Upstash HTTP {exc.code}: token rechazado ({detail or 'sin detalle'}). "
+                                  "Usa el UPSTASH_REDIS_REST_TOKEN de esa misma base (no el de solo lectura "
+                                  "ni el de QStash).") from exc
             raise StoreError(f"Upstash HTTP {exc.code}: {detail}") from exc
         except Exception as exc:
             raise StoreError(f"Upstash no responde: {exc}") from exc
@@ -183,6 +230,7 @@ class StateStore:
         self.last_ok    = 0.0                  # último contacto confirmado como dueña
         self.last_write = 0.0                  # último documento guardado
         self.last_error = ""
+        self.config_error = ""                 # URL/token mal configurados (se muestra en el panel)
         self.writes = 0
         self.failures = 0
         self.last_doc: Optional[dict] = None
@@ -237,7 +285,8 @@ class StateStore:
         elif not self.remote:
             mode = "local" if self.writes_enabled else "recuperando"
         elif not self.is_owner:
-            mode = "standby" if self.fenced else "esperando control"
+            mode = ("error de configuración" if self.config_error
+                    else "standby" if self.fenced else "esperando control")
         elif not self.writes_enabled:
             mode = "recuperando"
         elif now - self.last_ok <= OWNER_LEASE_S / 2:
@@ -256,6 +305,7 @@ class StateStore:
             "failures":      self.failures,
             "pending":       self._pending_critical() or bool(self._trades),
             "last_error":    self.last_error,
+            "config_error":  self.config_error,
         }
 
     # ── API para el bot ──────────────────────────────────────────────────────
@@ -381,14 +431,24 @@ class StateStore:
                 else:
                     self._flush()
                 self._backoff = 1.0
+                self.config_error = ""
+            except ConfigError as exc:
+                self._failed(str(exc), config=True)
             except StoreError as exc:
                 self._failed(str(exc))
             except Exception as exc:          # nunca debe morir el hilo
                 self._failed(f"error inesperado: {exc!r}")
 
-    def _failed(self, msg: str) -> None:
+    def _failed(self, msg: str, config: bool = False) -> None:
         self.failures += 1
         self.last_error = msg
+        if config:
+            # Reintentar en segundos no lo arregla: aviso claro y reintento cada CONFIG_RETRY_S.
+            self.config_error = msg
+            self._next_try = time.time() + CONFIG_RETRY_S
+            self.log(f"[estado] ⛔ {msg} Mientras tanto el bot no abre ni cierra posiciones "
+                     f"(o quita las dos variables para operar sin guardar). Reintento en {CONFIG_RETRY_S:.0f}s")
+            return
         self._next_try = time.time() + self._backoff
         self.log(f"[estado] {msg} — reintento en {self._backoff:.0f}s")
         self._backoff = min(self._backoff * 2, BACKOFF_MAX_S)
@@ -581,19 +641,20 @@ class StateStore:
 
 
 def make_owner_id() -> str:
-    inst = os.getenv("RENDER_INSTANCE_ID") or os.uname().nodename
+    inst = os.getenv("RENDER_INSTANCE_ID") or socket.gethostname() or "bot"
     return f"{inst}-{os.getpid()}-{int(time.time())}".replace("|", "-")
 
 
 def backend_from_env(log: Callable[[str], None]) -> Tuple[Optional[UpstashRedis], str]:
-    """Upstash si hay credenciales. Fuera de Render exige STATE_STORE_FORCE=true para
-    que una ejecución local no compita por el control con la instancia de producción."""
-    url = os.getenv("UPSTASH_REDIS_REST_URL", "").strip()
-    token = os.getenv("UPSTASH_REDIS_REST_TOKEN", "").strip()
-    if not url or not token:
+    """Upstash en cuanto estén las dos variables, en Render o en cualquier otro sitio.
+    Varias instancias con la misma base no se pisan: solo opera la que tiene el control
+    y las demás esperan (ver la cabecera del módulo)."""
+    url = _clean_env(os.getenv("UPSTASH_REDIS_REST_URL", ""))
+    token = _clean_env(os.getenv("UPSTASH_REDIS_REST_TOKEN", ""))
+    if not url and not token:
         return None, "sin UPSTASH_REDIS_REST_URL/TOKEN: el estado solo se guarda en disco local (se pierde al reiniciar en Render)"
-    on_render = bool(os.getenv("RENDER"))
-    if not on_render and os.getenv("STATE_STORE_FORCE", "false").lower() != "true":
-        return None, ("credenciales de Upstash presentes pero no estoy en Render: uso solo disco local "
-                      "para no competir con producción (STATE_STORE_FORCE=true para forzar)")
-    return UpstashRedis(url, token), "Upstash Redis"
+    backend = UpstashRedis(url, token)
+    if backend.problem:                     # el hilo del estado lo explica en el log y en el panel
+        return backend, "Upstash Redis (mal configurado, ver el error siguiente)"
+    host = urllib.parse.urlsplit(backend.url).hostname or ""
+    return backend, f"Upstash Redis ({host})"
