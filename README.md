@@ -93,9 +93,9 @@ Cómo se comporta:
 
 Configuración:
 
-1. Crea una base de datos Redis gratis en [upstash.com](https://upstash.com), en la región más cercana a tu servicio de Render.
-2. En la pestaña *REST API* copia `UPSTASH_REDIS_REST_URL` y `UPSTASH_REDIS_REST_TOKEN`.
-3. Añádelas como variables de entorno (secretas) del servicio en Render.
+1. En [console.upstash.com](https://console.upstash.com) abre la pestaña **Redis** (no QStash) y pulsa **Create Database**: un nombre, la región más cercana a donde corre el bot y el plan **Free**.
+2. En la base creada, sección **Connect → REST**, con *Read-Only Token* desactivado, copia `UPSTASH_REDIS_REST_URL` (empieza por `https://` y termina en `.upstash.io`, sin nada detrás) y `UPSTASH_REDIS_REST_TOKEN`.
+3. Añádelas como variables de entorno del servicio en Render (*Environment*), sin comillas. Para ejecutarlo en otro sitio, pon las mismas dos variables en ese equipo.
 
 El chip **estado guardado** del dashboard muestra `upstash · ok` cuando todo va bien. `GET /api/recovery` devuelve el último documento guardado.
 

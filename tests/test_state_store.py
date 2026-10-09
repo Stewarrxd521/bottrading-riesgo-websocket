@@ -352,3 +352,16 @@ def test_config_error_clears_once_the_store_answers(r, tmp_path):
         time.sleep(0.05)
     assert st.config_error == "" and st.status()["mode"] == "recuperando"
     st.close()
+
+
+@pytest.mark.parametrize("body,label,expect", [
+    ('{"error":"NOPERM this user has no permissions to run the \'eval\' command"}',
+     "error de configuración", "solo lectura"),
+    ('{"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500000"}',
+     "cupo de Upstash agotado", "cupo"),
+])
+def test_read_only_token_and_quota_are_explained(body, label, expect):
+    from state_store import _command_error, _error_text
+    exc = _command_error("Upstash HTTP 400", _error_text(body))
+    assert isinstance(exc, ConfigError) and exc.label == label and expect in str(exc)
+    assert type(_command_error("Upstash", "ERR wrong number of arguments")) is StoreError
